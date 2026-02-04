@@ -1,6 +1,6 @@
 services:
   komari-traffic-bot:
-    image: ghcr.io/<你的github用户名或组织>/komari-traffic-bot:latest
+    image: ghcr.io/wirelouis/komari-traffic-bot:latest
     env_file: .env
     environment:
       - TZ=Asia/Shanghai
@@ -11,7 +11,7 @@ services:
     command: ["python", "/app/komari_traffic_report.py", "listen"]
 
   komari-traffic-cron:
-    image: ghcr.io/<你的github用户名或组织>/komari-traffic-bot:latest
+    image: ghcr.io/wirelouis/komari-traffic-bot:latest
     env_file: .env
     environment:
       - TZ=Asia/Shanghai
