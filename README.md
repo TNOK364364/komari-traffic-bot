@@ -1,3 +1,8 @@
+<p align="center">
+  <a href="./README.md">简体中文</a> ｜ 
+  <a href="./README_EN.md">English</a>
+</p>
+
 # komari-traffic-bot（Docker 版）
 
 基于 **Komari 探针** 的流量统计增强工具，提供：
