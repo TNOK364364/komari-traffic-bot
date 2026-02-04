@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import json
+import logging
 import os
 import re
 import sys
@@ -9,6 +10,7 @@ import time
 import traceback
 import socket
 import gzip
+import concurrent.futures
 from dataclasses import dataclass
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
@@ -18,7 +20,8 @@ import random
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 
-TZ = ZoneInfo("Asia/Shanghai")  # 北京时间
+STAT_TZ = os.environ.get("STAT_TZ", "Asia/Shanghai")
+TZ = ZoneInfo(STAT_TZ)  # 统计时区
 
 KOMARI_BASE_URL = os.environ.get("KOMARI_BASE_URL", "").rstrip("/")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -27,6 +30,11 @@ DATA_DIR = os.environ.get("DATA_DIR", "/var/lib/komari-traffic")
 
 HISTORY_HOT_DAYS = int(os.environ.get("HISTORY_HOT_DAYS", "60"))
 HISTORY_RETENTION_DAYS = int(os.environ.get("HISTORY_RETENTION_DAYS", "400"))
+
+KOMARI_API_TOKEN = os.environ.get("KOMARI_API_TOKEN", "")
+KOMARI_API_TOKEN_HEADER = os.environ.get("KOMARI_API_TOKEN_HEADER", "Authorization")
+KOMARI_API_TOKEN_PREFIX = os.environ.get("KOMARI_API_TOKEN_PREFIX", "Bearer")
+KOMARI_FETCH_WORKERS = int(os.environ.get("KOMARI_FETCH_WORKERS", "6"))
 
 TOP_N = int(os.environ.get("TOP_N", "3"))  # 默认 Top3（日报/周报/月报/Top命令都用它）
 
@@ -40,6 +48,9 @@ SAMPLES_PATH = os.path.join(DATA_DIR, "samples.json")
 TG_OFFSET_PATH = os.path.join(DATA_DIR, "tg_offset.txt")
 
 TIMEOUT = int(os.environ.get("KOMARI_TIMEOUT_SECONDS", "15"))  # Komari API timeout（秒）
+
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+LOG_FILE = os.environ.get("LOG_FILE", "").strip()
 
 
 def build_http_session() -> requests.Session:
@@ -60,6 +71,26 @@ def build_http_session() -> requests.Session:
 
 
 HTTP_SESSION = build_http_session()
+
+
+def setup_logging():
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if LOG_FILE:
+        handlers.append(logging.FileHandler(LOG_FILE, encoding="utf-8"))
+    logging.basicConfig(
+        level=getattr(logging, LOG_LEVEL, logging.INFO),
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=handlers,
+    )
+
+
+def build_komari_headers() -> dict:
+    headers = {"Accept": "application/json"}
+    if KOMARI_API_TOKEN:
+        prefix = KOMARI_API_TOKEN_PREFIX.strip()
+        value = f"{prefix} {KOMARI_API_TOKEN}".strip()
+        headers[KOMARI_API_TOKEN_HEADER] = value
+    return headers
 
 
 # -------------------- 基础工具 --------------------
@@ -124,7 +155,7 @@ def save_json_atomic(path: str, data):
 
 
 def get_json(url: str):
-    r = HTTP_SESSION.get(url, timeout=TIMEOUT, headers={"Accept": "application/json"})
+    r = HTTP_SESSION.get(url, timeout=TIMEOUT, headers=build_komari_headers())
     r.raise_for_status()
     return r.json()
 
@@ -213,38 +244,43 @@ def fetch_nodes_and_totals():
     out: list[NodeTotal] = []
     skipped: list[str] = []
 
-    for n in nodes:
-        uuid = n.get("uuid")
-        name = n.get("name") or uuid
+    def fetch_one(node: dict):
+        uuid = node.get("uuid")
+        name = node.get("name") or uuid
         if not uuid:
-            continue
-
+            return None, None
         try:
             recent_resp = get_json(f"{KOMARI_BASE_URL}/api/recent/{uuid}")
         except requests.exceptions.ReadTimeout:
-            skipped.append(f"{name}(timeout)")
-            continue
+            return None, f"{name}(timeout)"
         except requests.exceptions.RequestException as e:
-            skipped.append(f"{name}({type(e).__name__})")
-            continue
+            return None, f"{name}({type(e).__name__})"
         except Exception as e:
-            skipped.append(f"{name}({type(e).__name__})")
-            continue
+            return None, f"{name}({type(e).__name__})"
 
         if not (isinstance(recent_resp, dict) and recent_resp.get("status") == "success"):
-            skipped.append(f"{name}(bad_resp)")
-            continue
+            return None, f"{name}(bad_resp)"
 
         points = recent_resp.get("data", [])
         if not points:
-            skipped.append(f"{name}(empty)")
-            continue
+            return None, f"{name}(empty)"
 
         last = points[-1]
         net = last.get("network", {}) if isinstance(last, dict) else {}
         up = int(net.get("totalUp", 0))
         down = int(net.get("totalDown", 0))
-        out.append(NodeTotal(uuid=uuid, name=name, up=up, down=down))
+        return NodeTotal(uuid=uuid, name=name, up=up, down=down), None
+
+    max_workers = max(1, min(len(nodes), KOMARI_FETCH_WORKERS))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {executor.submit(fetch_one, n): n for n in nodes}
+        for future in concurrent.futures.as_completed(future_map):
+            result, skip = future.result()
+            if skip:
+                skipped.append(skip)
+                continue
+            if result:
+                out.append(result)
 
     return out, skipped
 
@@ -801,6 +837,7 @@ def listen_commands():
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         raise RuntimeError("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 未设置")
 
+    logging.info("Komari traffic bot starting (stat_tz=%s)", STAT_TZ)
     offset = load_offset()
 
     # 启动先采一次样
@@ -895,6 +932,7 @@ def listen_commands():
         except Exception as e:
             if should_alert("listen", 300):
                 alert_exception("listen_loop", "listen", e)
+            logging.exception("listen loop error")
             time.sleep(3)
 
 
@@ -926,6 +964,7 @@ def main():
 
 
 if __name__ == "__main__":
+    setup_logging()
     full_cmd = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "(none)"
     try:
         sys.exit(main())
