@@ -66,6 +66,9 @@ cat > .env <<'ENV'
 # Komari 面板地址（不要以 / 结尾）
 KOMARI_BASE_URL=https://your-komari.example
 
+# Komari API 超时（秒）
+KOMARI_TIMEOUT_SECONDS=15
+
 # Telegram
 TELEGRAM_BOT_TOKEN=123456:YOUR_BOT_TOKEN
 TELEGRAM_CHAT_ID=123456789

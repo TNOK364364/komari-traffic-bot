@@ -15,6 +15,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 import random
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
 TZ = ZoneInfo("Asia/Shanghai")  # 北京时间
 
@@ -37,7 +39,27 @@ HISTORY_PATH = os.path.join(DATA_DIR, "history.json")
 SAMPLES_PATH = os.path.join(DATA_DIR, "samples.json")
 TG_OFFSET_PATH = os.path.join(DATA_DIR, "tg_offset.txt")
 
-TIMEOUT = 15  # Komari API timeout（秒）
+TIMEOUT = int(os.environ.get("KOMARI_TIMEOUT_SECONDS", "15"))  # Komari API timeout（秒）
+
+
+def build_http_session() -> requests.Session:
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        status=3,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET"]),
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session = requests.Session()
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+HTTP_SESSION = build_http_session()
 
 
 # -------------------- 基础工具 --------------------
@@ -102,7 +124,7 @@ def save_json_atomic(path: str, data):
 
 
 def get_json(url: str):
-    r = requests.get(url, timeout=TIMEOUT, headers={"Accept": "application/json"})
+    r = HTTP_SESSION.get(url, timeout=TIMEOUT, headers={"Accept": "application/json"})
     r.raise_for_status()
     return r.json()
 
@@ -718,7 +740,7 @@ def get_updates(offset: int | None):
     last_exc = None
     for _ in range(5):
         try:
-            r = requests.get(url, params=params, timeout=TIMEOUT + 60)
+            r = HTTP_SESSION.get(url, params=params, timeout=TIMEOUT + 60)
             r.raise_for_status()
             return r.json()
         except (requests.exceptions.ConnectionError,

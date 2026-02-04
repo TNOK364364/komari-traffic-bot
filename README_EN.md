@@ -67,6 +67,9 @@ cat > .env <<'ENV'
 # Komari panel base URL (no trailing slash)
 KOMARI_BASE_URL=https://your-komari.example
 
+# Komari API timeout (seconds)
+KOMARI_TIMEOUT_SECONDS=15
+
 # Telegram
 TELEGRAM_BOT_TOKEN=123456:YOUR_BOT_TOKEN
 TELEGRAM_CHAT_ID=123456789
